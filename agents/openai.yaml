@@ -1,0 +1,5 @@
+interface:
+  display_name: "Industrial Product Beautification"
+  short_description: "Retouch and QA transparent industrial product images"
+  default_prompt: "Use $industrial-product-beautification to retouch industrial product photos into structure-faithful transparent PNG catalog assets and verify the outputs."
+
