@@ -126,21 +126,22 @@ def remove_key(
     )
     final_alpha = np.minimum(source_alpha, keyed_alpha)
 
-    affected = removal_mask
-    removal = np.clip(1.0 - keyed_alpha / 255.0, 0.0, 1.0)
-    spill = np.maximum(dominance.astype(np.float32), 0.0) * removal
+    # Despill only pixels selected for removal. Protected interior product pixels
+    # may legitimately share the key hue, so changing their RGB would damage the
+    # product even when their alpha is preserved.
+    affected = removal_mask & candidate & (dominance > 0)
     corrected = rgb.astype(np.float32)
 
     if key == "magenta":
         for channel in (0, 2):
-            corrected[:, :, channel][affected] = np.maximum(
-                corrected[:, :, channel][affected] - spill[affected],
+            corrected[:, :, channel][affected] = np.minimum(
+                corrected[:, :, channel][affected],
                 corrected[:, :, 1][affected],
             )
     else:
-        corrected[:, :, 1][affected] = np.maximum(
-            corrected[:, :, 1][affected] - spill[affected],
-            np.minimum(corrected[:, :, 0][affected], corrected[:, :, 2][affected]),
+        corrected[:, :, 1][affected] = np.minimum(
+            corrected[:, :, 1][affected],
+            np.maximum(corrected[:, :, 0][affected], corrected[:, :, 2][affected]),
         )
 
     rgba[:, :, :3] = np.clip(corrected, 0, 255).astype(np.uint8)

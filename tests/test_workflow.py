@@ -27,9 +27,11 @@ class KeyRemovalTests(unittest.TestCase):
     def test_auto_preserves_ambiguous_product_color_and_removes_pure_hole(self) -> None:
         result, metrics = remove_key(self.make_keyed_image(), "green", "auto")
         alpha = np.asarray(result.getchannel("A"))
+        rgb = np.asarray(result.convert("RGB"))
 
         self.assertEqual(int(alpha[0, 0]), 0)
         self.assertEqual(int(alpha[5, 5]), 255)
+        self.assertEqual(tuple(rgb[5, 5]), (0, 180, 0))
         self.assertEqual(int(alpha[13, 13]), 0)
         self.assertEqual(metrics["protected_interior_key_pixels"], 9)
         self.assertEqual(metrics["removed_interior_key_pixels"], 9)
@@ -41,6 +43,16 @@ class KeyRemovalTests(unittest.TestCase):
         self.assertEqual(int(alpha[13, 13]), 255)
         self.assertEqual(metrics["removed_interior_key_pixels"], 0)
         self.assertEqual(metrics["protected_interior_key_pixels"], 18)
+
+    def test_despill_neutralizes_connected_magenta_fringe(self) -> None:
+        pixels = np.full((5, 5, 3), (80, 80, 80), dtype=np.uint8)
+        pixels[0, 2] = (120, 70, 120)
+        result, _ = remove_key(Image.fromarray(pixels, "RGB"), "magenta", "auto")
+        rgba = np.asarray(result)
+
+        self.assertGreater(int(rgba[0, 2, 3]), 0)
+        self.assertLess(int(rgba[0, 2, 3]), 255)
+        self.assertEqual(tuple(rgba[0, 2, :3]), (70, 70, 70))
 
 
 class SourceCompletenessTests(unittest.TestCase):

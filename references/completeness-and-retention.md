@@ -12,6 +12,14 @@ Do not infer completeness from the number of outputs and do not change `--expect
 what was produced. The source directory is authoritative. A valid delivery has exactly one
 `<source-stem>_beautified.png` for every readable source image at the same relative path.
 
+## Bind generated assets deterministically
+
+Before editing, create a manifest that fixes each source path, target path, processing status,
+QA path, and generated asset identifier. Bind responses by an explicit identifier returned by
+the editing service. Parallel completion order, file modification time, and directory sorting
+are not valid identity signals. If stable response identifiers are unavailable, process one
+source at a time.
+
 ## Interpret key-extraction metrics
 
 `finalize_keyed_product.py` writes a `key_extraction` object to each QA JSON:
@@ -27,6 +35,9 @@ what was produced. The source directory is authoritative. A valid delivery has e
 The default `--interior-key auto` is the safest general mode. If protected pixels are reported,
 inspect the keyed intermediate and the final alpha at those locations. Regenerate with a
 non-overlapping key color when the product materially overlaps the key.
+Despill only pixels that the removal mask selected as background or antialiased fringe. Protected
+interior product pixels must retain both their original alpha and RGB values.
+
 
 Use `--interior-key preserve` when all enclosed key-like color belongs to the product and hole
 transparency will be handled separately. Use `--interior-key remove` only after visual
@@ -44,13 +55,18 @@ python scripts/validate_outputs.py \
   --report job/qa/validation.json
 ```
 
-The report must have:
+The source-coverage gate requires:
 
-- `automatic_checks_passed: true`
 - `missing_output_count: 0`
-- `unexpected_output_count: 0`
 - no duplicate expected output paths
 - no unapproved unreadable originals
+- every expected output to pass the per-file dimension, mode, alpha, and naming checks
+
+In a dedicated delivery root, also require `unexpected_output_count: 0` and
+`automatic_checks_passed: true`. In a mixed legacy output root, unexpected files may make the
+top-level automatic flag false even when the complete expected set passes. Report those files
+separately and get explicit authorization before deleting, moving, overwriting, or otherwise
+changing them.
 
 Automatic checks prove file and alpha completeness only. Review before/after sheets for missing
 parts, altered geometry, cropped extremities, changed markings, and incorrect holes before

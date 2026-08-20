@@ -12,7 +12,11 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
 
 1. Choose one authoritative source root, inventory every supported image beneath it, and keep
    every original read-only. Exclude prior output, QA, cache, and intermediate directories from
-   discovery.
+   discovery. Create a stable manifest before editing; record the source path, deterministic
+   output path, processing status, QA path, and generated asset identifier for every item. Bind
+   each generated asset to its source using explicit response metadata. Never infer this mapping
+   from parallel completion order, timestamps, or directory sorting. If the editing service does
+   not return stable identifiers, process edits sequentially.
 2. Inspect representative images and record a structure checklist for each product family:
    part count, hole count and position, fasteners, joints, text/embossing, color, material,
    viewing angle, proportions, and open internal areas.
@@ -23,25 +27,34 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
    material clarity, local contrast, and edge definition.
 5. Require a pure chroma background and no cast shadow, floor, props, text, logo, watermark,
    or added object. Read [prompt-patterns.md](references/prompt-patterns.md) before composing
-   the editing prompt.
+   the editing prompt. For large jobs, work in small reviewable batches and verify each response
+   against the manifest before finalization. Regenerate any item with unsafe gradients, gray
+   backgrounds, structural changes, or key colors that overlap the product; do not compensate
+   with broad destructive thresholds.
 6. Choose the key color with the lowest overlap with the product:
    - Use magenta for green products and most cool-colored plastics.
    - Use green for silver, gray, black, neutral metal, and warm-colored products.
    - If both colors occur materially in the product, choose another extraction method; do not
      erase legitimate product pixels to force chroma keying.
-7. Convert each keyed edit with `scripts/finalize_keyed_product.py`. Preserve relative source
+7. Work from the manifest in small batches. After each batch, compare every keyed asset with its
+   source, confirm its asset identifier and target path, and redo only the failing item before
+   continuing.
+8. Convert each keyed edit with `scripts/finalize_keyed_product.py`. Preserve relative source
    folders, append `_beautified` to the filename, and write one QA JSON per image. Keep the
    default `--interior-key auto`; inspect protected interior key pixels before overriding it.
-8. Validate with `scripts/validate_outputs.py --original-root <source-root>`. The source tree,
+   Apply despill only to pixels selected for background removal. Retained product pixels that
+   resemble the key color must keep both their alpha and original RGB values.
+9. Validate with `scripts/validate_outputs.py --original-root <source-root>`. The source tree,
    not a manually entered output count, defines the expected set. Read
    [completeness-and-retention.md](references/completeness-and-retention.md) when interpreting
    missing, unexpected, unreadable, collision, or protected-key results.
-9. Create review sheets with `scripts/make_qa_sheet.py`, then visually compare every output
-   with its original. Automatic file and alpha checks do not prove structural fidelity. Reject
-   invented, missing, relocated, cropped, or distorted features.
-10. Deliver only after every automatic failure is resolved, every readable source maps to
-    exactly one output, and every visual structure check passes. Report damaged sources
-    separately; never silently omit them.
+10. Create review sheets with `scripts/make_qa_sheet.py`, then visually compare every output
+    with its original. Automatic file and alpha checks do not prove structural fidelity. Reject
+    invented, missing, relocated, cropped, or distorted features.
+11. Deliver only after every readable source maps to exactly one valid output and every visual
+    structure check passes. Report damaged sources separately; never silently omit them.
+    Unexpected legacy files in a mixed output root must be reported separately and must never be
+    deleted, moved, or overwritten without explicit authorization.
 
 ## Output contract
 
