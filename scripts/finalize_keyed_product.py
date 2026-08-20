@@ -6,10 +6,11 @@ import shutil
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 
 KEY_CHOICES = ("auto", "magenta", "green")
+INTERIOR_KEY_CHOICES = ("auto", "preserve", "remove")
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +26,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--key", choices=KEY_CHOICES, default="auto")
     parser.add_argument("--canvas", type=int, default=2048)
     parser.add_argument("--occupancy", type=float, default=0.90)
+    parser.add_argument(
+        "--interior-key",
+        choices=INTERIOR_KEY_CHOICES,
+        default="auto",
+        help=(
+            "How to handle key-like pixels disconnected from the canvas border: "
+            "auto removes only near-pure enclosed key regions, preserve keeps them, "
+            "and remove applies keying everywhere (least structure-safe)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -51,7 +62,29 @@ def select_key(image: Image.Image, requested: str) -> tuple[str, dict[str, float
     return selected, scores
 
 
-def remove_key(image: Image.Image, key: str) -> Image.Image:
+def border_connected(mask: np.ndarray) -> np.ndarray:
+    """Return mask pixels connected to an artificial one-pixel outer border."""
+    height, width = mask.shape
+    padded = np.ones((height + 2, width + 2), dtype=np.uint8)
+    padded[1:-1, 1:-1] = mask.astype(np.uint8)
+    flood = Image.fromarray(padded, "L").copy()
+    ImageDraw.floodfill(flood, (0, 0), 2, thresh=0)
+    return np.asarray(flood, dtype=np.uint8)[1:-1, 1:-1] == 2
+
+
+def near_pure_key(rgb: np.ndarray, key: str, tolerance: int = 24) -> np.ndarray:
+    target = np.array(
+        [255, 0, 255] if key == "magenta" else [0, 255, 0],
+        dtype=np.int16,
+    )
+    return np.max(np.abs(rgb - target), axis=2) <= tolerance
+
+
+def remove_key(
+    image: Image.Image,
+    key: str,
+    interior_key: str = "auto",
+) -> tuple[Image.Image, dict[str, object]]:
     rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8).copy()
     rgb = rgba[:, :, :3].astype(np.int16)
     source_alpha = rgba[:, :, 3].astype(np.float32)
@@ -66,14 +99,34 @@ def remove_key(image: Image.Image, key: str) -> Image.Image:
 
     strong = (dominance >= 55) & (strength >= 115)
     fringe = (dominance >= 28) & (strength >= 90) & ~strong
+    candidate = strong | fringe
+    connected = border_connected(candidate)
+    interior_candidate = candidate & ~connected
+
+    if interior_key == "remove":
+        interior_removal = interior_candidate
+    elif interior_key == "preserve":
+        interior_removal = np.zeros_like(interior_candidate)
+    else:
+        interior_core = interior_candidate & near_pure_key(rgb, key)
+        expanded_core = np.asarray(
+            Image.fromarray(interior_core.astype(np.uint8) * 255, "L").filter(
+                ImageFilter.MaxFilter(5)
+            ),
+            dtype=np.uint8,
+        ) > 0
+        interior_removal = interior_candidate & (interior_core | (expanded_core & fringe))
+
+    removal_mask = connected | interior_removal
     keyed_alpha = np.full(dominance.shape, 255.0, dtype=np.float32)
-    keyed_alpha[strong] = 0.0
-    keyed_alpha[fringe] = (
-        np.clip((55.0 - dominance[fringe]) / 27.0, 0.0, 1.0) * 255.0
+    keyed_alpha[strong & removal_mask] = 0.0
+    removable_fringe = fringe & removal_mask
+    keyed_alpha[removable_fringe] = (
+        np.clip((55.0 - dominance[removable_fringe]) / 27.0, 0.0, 1.0) * 255.0
     )
     final_alpha = np.minimum(source_alpha, keyed_alpha)
 
-    affected = strong | fringe
+    affected = removal_mask
     removal = np.clip(1.0 - keyed_alpha / 255.0, 0.0, 1.0)
     spill = np.maximum(dominance.astype(np.float32), 0.0) * removal
     corrected = rgb.astype(np.float32)
@@ -94,7 +147,17 @@ def remove_key(image: Image.Image, key: str) -> Image.Image:
     rgba[:, :, 3] = np.clip(final_alpha, 0, 255).astype(np.uint8)
     rgba[rgba[:, :, 3] <= 2, 3] = 0
     rgba[rgba[:, :, 3] == 0, :3] = 0
-    return Image.fromarray(rgba, "RGBA")
+    extraction = {
+        "interior_key_policy": interior_key,
+        "key_candidate_pixels": int(np.count_nonzero(candidate)),
+        "border_connected_key_pixels": int(np.count_nonzero(connected)),
+        "interior_key_candidate_pixels": int(np.count_nonzero(interior_candidate)),
+        "removed_interior_key_pixels": int(np.count_nonzero(interior_removal)),
+        "protected_interior_key_pixels": int(
+            np.count_nonzero(interior_candidate & ~interior_removal)
+        ),
+    }
+    return Image.fromarray(rgba, "RGBA"), extraction
 
 
 def resize_premultiplied(image: Image.Image, size: tuple[int, int]) -> Image.Image:
@@ -166,7 +229,7 @@ def main() -> None:
     with Image.open(args.source) as source:
         source.load()
         selected_key, key_scores = select_key(source, args.key)
-        transparent = remove_key(source, selected_key)
+        transparent, extraction = remove_key(source, selected_key, args.interior_key)
 
     alpha = transparent.getchannel("A")
     bbox = alpha.getbbox()
@@ -208,6 +271,7 @@ def main() -> None:
         "height": args.canvas,
         "mode": "RGBA",
         "target_occupancy": args.occupancy,
+        "key_extraction": extraction,
         **metrics,
         "automatic_checks_passed": True,
         "visual_structure_check_required": True,
@@ -218,4 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

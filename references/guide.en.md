@@ -8,8 +8,8 @@ changing engineering facts. Hole locations and counts, bolts, washers, seams, ma
 count, viewing angle, proportions, and silhouette must remain identical to the source.
 
 The standard workflow covers source discovery, a structural checklist, pilot review, AI image
-editing, chroma-key extraction, 2048-square normalization, per-image QA, full-set validation,
-and before/after visual review.
+editing, structure-safe chroma-key extraction, 2048-square normalization, per-image QA,
+source-derived full-set validation, and before/after visual review.
 
 ## 2. Environment deployment
 
@@ -107,18 +107,28 @@ python scripts/finalize_keyed_product.py `
 production batches. The defaults are a 2048x2048 canvas and 90% maximum product occupancy;
 override them with `--canvas` and `--occupancy`.
 
+The default `--interior-key auto` removes key-like background connected to the canvas edge and
+treats only near-pure enclosed key regions as holes. The QA JSON `key_extraction` object records
+border-connected, removed-interior, and protected-interior pixel counts. Inspect unexpected
+interior candidates in the keyed image and final alpha. Prefer a non-overlapping key color; do
+not force `--interior-key remove` when it could erase product color.
+
 ### 4.4 Validate the full delivery
 
 ```powershell
 python scripts/validate_outputs.py `
+  --original-root job/originals `
   --root job/outputs `
-  --report job/qa/validation.json `
-  --expected 12
+  --report job/qa/validation.json
 ```
 
-The validator checks count, PNG/RGBA format, size, transparent corners, the presence of both
-fully transparent and fully opaque pixels, and whether the product touches the canvas edge. A
-nonzero exit code means at least one check failed.
+The validator treats `--original-root` as authoritative. It requires exactly one
+`<source-stem>_beautified.png` at the matching relative path for every readable source and
+reports missing outputs, unexpected outputs, wrong directory levels, name collisions, and
+unreadable originals. It also checks PNG/RGBA format, size, transparent corners, fully
+transparent and opaque pixels, and canvas-edge contact. Do not change `--expected` to the
+current output count to hide a failure. A nonzero exit code means the delivery is incomplete or
+an output check failed.
 
 ### 4.5 Create a batch review sheet
 
@@ -136,9 +146,9 @@ any image with an engineering-structure change.
 ## 5. Delivery standard
 
 - Never overwrite, rename, or delete originals.
-- Name outputs `<source-stem>_beautified.png` and preserve relative directories.
+- Produce exactly one output per readable source, name it `<source-stem>_beautified.png`, and
+  preserve relative directories.
 - Default to 2048x2048 PNG, RGBA, with alpha zero at all four corners.
 - Preserve transparency through holes and open structures.
 - Add no text, brand, watermark, prop, floor, shadow, or decoration.
 - Report unreadable or damaged sources separately; never omit them silently.
-

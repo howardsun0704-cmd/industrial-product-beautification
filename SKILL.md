@@ -10,8 +10,9 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
 
 ## Required workflow
 
-1. Discover the source set and keep every original read-only. Exclude prior output, QA, cache,
-   and intermediate directories from discovery.
+1. Choose one authoritative source root, inventory every supported image beneath it, and keep
+   every original read-only. Exclude prior output, QA, cache, and intermediate directories from
+   discovery.
 2. Inspect representative images and record a structure checklist for each product family:
    part count, hole count and position, fasteners, joints, text/embossing, color, material,
    viewing angle, proportions, and open internal areas.
@@ -29,17 +30,23 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
    - If both colors occur materially in the product, choose another extraction method; do not
      erase legitimate product pixels to force chroma keying.
 7. Convert each keyed edit with `scripts/finalize_keyed_product.py`. Preserve relative source
-   folders, append `_beautified` to the filename, and write one QA JSON per image.
-8. Validate the whole set with `scripts/validate_outputs.py`, then create batch review sheets
-   with `scripts/make_qa_sheet.py`.
-9. Visually compare each output with its original. Automatic alpha checks do not prove
-   structural fidelity. Reject invented, missing, relocated, or distorted features.
-10. Deliver only after every automatic failure is resolved and every visual structure check
-    passes. Report unreadable or damaged source files separately; never silently omit them.
+   folders, append `_beautified` to the filename, and write one QA JSON per image. Keep the
+   default `--interior-key auto`; inspect protected interior key pixels before overriding it.
+8. Validate with `scripts/validate_outputs.py --original-root <source-root>`. The source tree,
+   not a manually entered output count, defines the expected set. Read
+   [completeness-and-retention.md](references/completeness-and-retention.md) when interpreting
+   missing, unexpected, unreadable, collision, or protected-key results.
+9. Create review sheets with `scripts/make_qa_sheet.py`, then visually compare every output
+   with its original. Automatic file and alpha checks do not prove structural fidelity. Reject
+   invented, missing, relocated, cropped, or distorted features.
+10. Deliver only after every automatic failure is resolved, every readable source maps to
+    exactly one output, and every visual structure check passes. Report damaged sources
+    separately; never silently omit them.
 
 ## Output contract
 
 - Keep originals untouched and preserve their relative directory structure.
+- Produce exactly one correctly named output for every readable source image.
 - Deliver PNG in RGBA mode on a square canvas; default to 2048 x 2048.
 - Keep all four corner alpha values at zero and preserve transparency through holes and open
   structures.
@@ -77,9 +84,9 @@ Validate a delivery set:
 
 ```bash
 python scripts/validate_outputs.py \
+  --original-root job/originals \
   --root job/outputs \
-  --report job/qa/validation.json \
-  --expected 12
+  --report job/qa/validation.json
 ```
 
 Build a visual review sheet:
@@ -96,4 +103,3 @@ python scripts/make_qa_sheet.py \
 - Read [guide.zh-CN.md](references/guide.zh-CN.md) for Chinese deployment, usage, and
   operating instructions.
 - Read [guide.en.md](references/guide.en.md) for the English version.
-
