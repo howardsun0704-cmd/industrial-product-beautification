@@ -8,9 +8,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+from structure_checks import DEFAULT_ANALYSIS_SIZE, compare_structure_images
+
 
 KEY_CHOICES = ("auto", "magenta", "green")
 INTERIOR_KEY_CHOICES = ("auto", "preserve", "remove")
+STRUCTURE_POLICY_CHOICES = ("strict", "warn", "off")
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +37,30 @@ def parse_args() -> argparse.Namespace:
             "How to handle key-like pixels disconnected from the canvas border: "
             "auto removes only near-pure enclosed key regions, preserve keeps them, "
             "and remove applies keying everywhere (least structure-safe)."
+        ),
+    )
+    parser.add_argument(
+        "--structure-policy",
+        choices=STRUCTURE_POLICY_CHOICES,
+        default="strict",
+        help=(
+            "Compare original structure with the extracted foreground. strict rejects any "
+            "finding, warn writes review-only findings but still rejects hard failures, and "
+            "off disables the comparison."
+        ),
+    )
+    parser.add_argument(
+        "--structure-analysis-size",
+        type=int,
+        default=DEFAULT_ANALYSIS_SIZE,
+        help="Maximum side length used by the structure comparison.",
+    )
+    parser.add_argument(
+        "--approve-structure-review",
+        action="store_true",
+        help=(
+            "With --structure-policy warn, mark review-only findings as approved after a "
+            "human source/output comparison. Hard failures can never be approved."
         ),
     )
     return parser.parse_args()
@@ -210,6 +237,10 @@ def main() -> None:
     args = parse_args()
     if args.canvas < 256:
         raise ValueError("--canvas must be at least 256")
+    if not 128 <= args.structure_analysis_size <= 1024:
+        raise ValueError("--structure-analysis-size must be between 128 and 1024")
+    if args.approve_structure_review and args.structure_policy != "warn":
+        raise ValueError("--approve-structure-review requires --structure-policy warn")
     if not 0.10 <= args.occupancy <= 0.98:
         raise ValueError("--occupancy must be between 0.10 and 0.98")
     if args.output.suffix.lower() != ".png":
@@ -231,6 +262,45 @@ def main() -> None:
         source.load()
         selected_key, key_scores = select_key(source, args.key)
         transparent, extraction = remove_key(source, selected_key, args.interior_key)
+
+    structure = None
+    if args.structure_policy != "off":
+        with Image.open(args.original) as original:
+            original.load()
+            structure = compare_structure_images(
+                original,
+                transparent,
+                max_side=args.structure_analysis_size,
+            )
+        if structure["hard_failure"] or (
+            args.structure_policy == "strict" and structure["findings"]
+        ):
+            rejected_report = {
+                "batch_id": args.batch_id,
+                "status": "structure_rejected",
+                "original": str(args.original.resolve()),
+                "source": str(args.source.resolve()),
+                "output": str(args.output.resolve()),
+                "selected_key": selected_key,
+                "key_extraction": extraction,
+                "structure_policy": args.structure_policy,
+                "structure_check": structure,
+                "automatic_checks_passed": False,
+                "visual_structure_check_required": True,
+            }
+            args.qa.write_text(
+                json.dumps(rejected_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            codes = [str(item["code"]) for item in structure["findings"]]
+            raise RuntimeError(f"Structure validation failed: {codes}")
+
+    review_approved = bool(
+        args.approve_structure_review
+        and structure
+        and structure["findings"]
+        and not structure["hard_failure"]
+    )
 
     alpha = transparent.getchannel("A")
     bbox = alpha.getbbox()
@@ -262,6 +332,13 @@ def main() -> None:
     canvas.save(args.output, format="PNG", optimize=True)
     report = {
         "batch_id": args.batch_id,
+        "status": (
+            "review_approved"
+            if review_approved
+            else "written_with_review"
+            if structure and structure["findings"]
+            else "passed"
+        ),
         "original": str(args.original.resolve()),
         "source": str(args.source.resolve()),
         "key_copy": str(args.key_copy.resolve()) if args.key_copy else None,
@@ -273,8 +350,12 @@ def main() -> None:
         "mode": "RGBA",
         "target_occupancy": args.occupancy,
         "key_extraction": extraction,
+        "structure_policy": args.structure_policy,
+        "structure_check": structure,
+        "structure_review_approved": review_approved,
         **metrics,
-        "automatic_checks_passed": True,
+        "automatic_checks_passed": not (structure and structure["hard_failure"]),
+        "delivery_ready": not (structure and structure["findings"]) or review_approved,
         "visual_structure_check_required": True,
     }
     args.qa.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

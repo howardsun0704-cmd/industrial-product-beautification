@@ -44,6 +44,40 @@ transparency will be handled separately. Use `--interior-key remove` only after 
 confirmation that every enclosed candidate is background visible through a real opening; this
 mode can delete legitimate product pixels.
 
+## Source/output structure gate
+
+The structure checker derives a conservative foreground mask from the original border color and
+compares it with the final alpha at a reduced analysis resolution. It checks:
+
+- major connected product-subject count;
+- enclosed opening count and normalized transparent area;
+- fragmented opening boundaries that indicate opaque residue;
+- source product contact with a frame edge;
+- large silhouette aspect-ratio changes.
+
+Findings are intentionally two-level:
+
+- severity: fail covers high-confidence loss, such as fewer major subjects, fewer enclosed
+  openings, or a collapsed transparent opening. These findings cannot be approved.
+- severity: review covers ambiguous changes, including a source crop, moderately reduced
+  opening area, fragmented opening edges, and silhouette-ratio drift. These block delivery until
+  the exact source/output pair is visually compared.
+
+Use strict structure validation for delivery. A reviewed warning may be approved only by its
+exact relative output path:
+
+~~~bash
+python scripts/validate_outputs.py \
+  --original-root job/originals \
+  --root job/outputs \
+  --report job/qa/validation.json \
+  --structure-policy strict \
+  --approve-structure-review family/cropped-part_beautified.png
+~~~
+
+Approval is path-specific and does not suppress a hard failure on that file. Never change a
+threshold or approve a whole directory merely to make a batch pass.
+
 ## Completion gate
 
 Run source-aware validation before delivery:

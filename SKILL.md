@@ -19,7 +19,10 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
    not return stable identifiers, process edits sequentially.
 2. Inspect representative images and record a structure checklist for each product family:
    part count, hole count and position, fasteners, joints, text/embossing, color, material,
-   viewing angle, proportions, and open internal areas.
+   viewing angle, proportions, and open internal areas. Run the source preflight before editing.
+   Record every frame edge touched by product pixels. Edge-contact sources enter crop-lock mode:
+   the edit must retain the same clipped extremity and must never reveal geometry outside the
+   source.
 3. Create a small pilot across materially different products before starting a large batch.
    Include plastic, metal, dark, reflective, and structurally complex items when present.
 4. Edit with an image-editing model. Clean dust, lint, fingerprints, minor stains, distracting
@@ -27,8 +30,9 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
    material clarity, local contrast, and edge definition.
 5. Require a pure chroma background and no cast shadow, floor, props, text, logo, watermark,
    or added object. Read [prompt-patterns.md](references/prompt-patterns.md) before composing
-   the editing prompt. For large jobs, work in small reviewable batches and verify each response
-   against the manifest before finalization. Regenerate any item with unsafe gradients, gray
+   the editing prompt. State the expected top-level subject count, enclosed-opening count, and
+   either full-frame or crop-lock framing rule in every request. For large jobs, work in
+   small reviewable batches and verify each response against the manifest before finalization. Regenerate any item with unsafe gradients, gray
    backgrounds, structural changes, or key colors that overlap the product; do not compensate
    with broad destructive thresholds.
 6. Choose the key color with the lowest overlap with the product:
@@ -40,19 +44,25 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
    source, confirm its asset identifier and target path, and redo only the failing item before
    continuing.
 8. Convert each keyed edit with `scripts/finalize_keyed_product.py`. Preserve relative source
-   folders, append `_beautified` to the filename, and write one QA JSON per image. Keep the
-   default `--interior-key auto`; inspect protected interior key pixels before overriding it.
-   Apply despill only to pixels selected for background removal. Retained product pixels that
-   resemble the key color must keep both their alpha and original RGB values.
-9. Validate with `scripts/validate_outputs.py --original-root <source-root>`. The source tree,
-   not a manually entered output count, defines the expected set. Read
-   [completeness-and-retention.md](references/completeness-and-retention.md) when interpreting
-   missing, unexpected, unreadable, collision, or protected-key results.
+   folders, append `_beautified` to the filename, and write one QA JSON per image. Its default
+   strict structure policy compares the original with the extracted alpha and rejects subject
+   loss, missing openings, source-edge crops, fragmented hole edges, and large silhouette drift.
+   Keep `--interior-key auto`; inspect protected interior key pixels before overriding it.
+   Apply despill only to selected background pixels. A review-only crop may use
+   `--structure-policy warn --approve-structure-review` only after direct human comparison;
+   a hard structure failure can never be approved.
+9. Validate with `scripts/validate_outputs.py` using `--original-root <source-root>
+   --structure-policy strict`. The source tree, not a manually entered output count, defines
+   the expected set. Read [completeness-and-retention.md](references/completeness-and-retention.md)
+   when interpreting completeness, protected-key, structure, or review-approval results. Approve
+   a review-only finding only by repeating `--approve-structure-review` with its exact relative
+   output path.
 10. Create review sheets with `scripts/make_qa_sheet.py`, then visually compare every output
     with its original. Automatic file and alpha checks do not prove structural fidelity. Reject
     invented, missing, relocated, cropped, or distorted features.
-11. Deliver only after every readable source maps to exactly one valid output and every visual
-    structure check passes. Report damaged sources separately; never silently omit them.
+11. Deliver only after every readable source maps to exactly one valid output, no hard structure
+    failure remains, and every review-only finding has a recorded per-file visual approval.
+    Report damaged sources separately; never silently omit them.
     Unexpected legacy files in a mixed output root must be reported separately and must never be
     deleted, moved, or overwritten without explicit authorization.
 
@@ -90,7 +100,8 @@ python scripts/finalize_keyed_product.py \
   --key magenta \
   --output job/outputs/part_beautified.png \
   --qa job/qa/reports/part.json \
-  --batch-id B01
+  --batch-id B01 \
+  --structure-policy strict
 ```
 
 Validate a delivery set:
@@ -99,7 +110,8 @@ Validate a delivery set:
 python scripts/validate_outputs.py \
   --original-root job/originals \
   --root job/outputs \
-  --report job/qa/validation.json
+  --report job/qa/validation.json \
+  --structure-policy strict
 ```
 
 Build a visual review sheet:

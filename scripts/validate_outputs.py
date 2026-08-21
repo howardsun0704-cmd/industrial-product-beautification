@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from structure_checks import DEFAULT_ANALYSIS_SIZE, compare_structure_files
+
 
 DEFAULT_SOURCE_EXTENSIONS = (
     ".bmp",
@@ -58,6 +60,30 @@ def parse_args() -> argparse.Namespace:
         "--allow-unreadable-originals",
         action="store_true",
         help="Report unreadable originals without failing the validation.",
+    )
+    parser.add_argument(
+        "--structure-policy",
+        choices=("strict", "warn", "off"),
+        default="strict",
+        help=(
+            "Compare each original with its output alpha. strict fails on every finding, "
+            "warn fails hard findings but only reports review findings, and off disables it."
+        ),
+    )
+    parser.add_argument(
+        "--structure-analysis-size",
+        type=int,
+        default=DEFAULT_ANALYSIS_SIZE,
+    )
+    parser.add_argument(
+        "--approve-structure-review",
+        action="append",
+        default=[],
+        metavar="RELATIVE_OUTPUT",
+        help=(
+            "Approve one review-only structure finding after visual comparison. Repeat with "
+            "the exact source-relative output path. Hard failures cannot be approved."
+        ),
     )
     return parser.parse_args()
 
@@ -177,8 +203,39 @@ def validate_output(path: Path, canvas: int) -> tuple[list[str], float | None, f
     return issues, transparent_fraction, opaque_fraction
 
 
+def compact_structure_result(result: dict[str, object]) -> dict[str, object]:
+    summary_keys = (
+        "analysis_size",
+        "foreground_bbox",
+        "foreground_aspect_ratio",
+        "foreground_fraction",
+        "edge_contacts",
+        "major_component_count",
+        "hole_count",
+        "hole_fraction_of_bbox",
+    )
+
+    def compact_side(side: dict[str, object] | None) -> dict[str, object] | None:
+        if side is None:
+            return None
+        return {key: side.get(key) for key in summary_keys}
+
+    return {
+        "source": compact_side(result.get("source")),
+        "output": compact_side(result.get("output")),
+        "findings": result.get("findings", []),
+        "hard_failure": bool(result.get("hard_failure")),
+        "review_required": bool(result.get("review_required")),
+    }
+
+
 def main() -> None:
     args = parse_args()
+    if not 128 <= args.structure_analysis_size <= 1024:
+        raise ValueError("--structure-analysis-size must be between 128 and 1024")
+    approved_structure_reviews = {
+        value.replace("\\", "/").casefold() for value in args.approve_structure_review
+    }
     if not args.root.is_dir():
         raise NotADirectoryError(args.root)
     if args.original_root is not None and not args.original_root.is_dir():
@@ -208,6 +265,8 @@ def main() -> None:
     unexpected_outputs: list[str] = []
     duplicate_expected_outputs: list[dict[str, object]] = []
     derived_expected_count: int | None = None
+    structure_checked_count = 0
+    structure_checks: list[dict[str, object]] = []
 
     if args.original_root is not None:
         extensions = normalized_extensions(args.source_extension)
@@ -227,8 +286,59 @@ def main() -> None:
 
         missing_keys = sorted(set(expected) - set(actual))
         unexpected_keys = sorted(set(actual) - set(expected))
+        matched_keys = sorted(set(expected) & set(actual))
         missing_outputs = [expected[key][1].as_posix() for key in missing_keys]
         unexpected_outputs = [actual[key].relative_to(args.root).as_posix() for key in unexpected_keys]
+
+        if args.structure_policy != "off":
+            structure_checked_count = len(matched_keys)
+            for key in matched_keys:
+                original, relative = expected[key]
+                output = actual[key]
+                try:
+                    result = compare_structure_files(
+                        original,
+                        output,
+                        max_side=args.structure_analysis_size,
+                    )
+                except Exception as exc:
+                    result = {
+                        "source": None,
+                        "output": None,
+                        "findings": [
+                            {
+                                "code": "structure_analysis_error",
+                                "severity": "fail",
+                                "detail": str(exc),
+                            }
+                        ],
+                        "hard_failure": True,
+                        "review_required": True,
+                    }
+                if result["findings"]:
+                    review_approved = (
+                        key in approved_structure_reviews and not result["hard_failure"]
+                    )
+                    record = {
+                        "source": str(original.resolve()),
+                        "output": str(output.resolve()),
+                        "relative_output": relative.as_posix(),
+                        "review_approved": review_approved,
+                        "result": compact_structure_result(result),
+                    }
+                    structure_checks.append(record)
+                    if result["hard_failure"] or (
+                        args.structure_policy == "strict" and not review_approved
+                    ):
+                        failures.append(
+                            {
+                                "file": str(output.resolve()),
+                                "source": str(original.resolve()),
+                                "issues": [
+                                    f"structure={item['code']}" for item in result["findings"]
+                                ],
+                            }
+                        )
 
         for key in missing_keys:
             original, relative = expected[key]
@@ -297,7 +407,19 @@ def main() -> None:
         "unexpected_outputs": unexpected_outputs,
         "duplicate_expected_outputs": duplicate_expected_outputs,
         "canvas": args.canvas,
+        "structure_policy": args.structure_policy,
+        "structure_checked_count": structure_checked_count,
+        "structure_flagged_count": len(structure_checks),
+        "structure_review_approved_count": sum(
+            bool(item["review_approved"]) for item in structure_checks
+        ),
+        "structure_unapproved_count": sum(
+            not bool(item["review_approved"]) for item in structure_checks
+        ),
+        "structure_checks": structure_checks,
         "automatic_checks_passed": not failures,
+        "delivery_ready": not failures
+        and all(bool(item["review_approved"]) for item in structure_checks),
         "visual_structure_check_required": True,
         "transparent_fraction_range": [
             round(min(transparent_fractions), 6) if transparent_fractions else None,

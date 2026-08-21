@@ -20,14 +20,26 @@ Append one of these blocks:
 **Magenta key**
 
 > Place only the product on a perfectly uniform #FF00FF background. Use no floor, horizon,
-> cast shadow, reflection, prop, text, logo, watermark, border, or decorative element. Keep the
-> full product inside the frame with comfortable margins.
+> cast shadow, reflection, prop, text, logo, watermark, border, or decorative element. Preserve
+> the source framing exactly and apply the framing rule below.
 
 **Green key**
 
 > Place only the product on a perfectly uniform #00FF00 background. Use no floor, horizon,
-> cast shadow, reflection, prop, text, logo, watermark, border, or decorative element. Keep the
-> full product inside the frame with comfortable margins.
+> cast shadow, reflection, prop, text, logo, watermark, border, or decorative element. Preserve
+> the source framing exactly and apply the framing rule below.
+
+## Framing rule
+
+Inspect the source before selecting a framing instruction:
+
+- If every product extremity is visible with background margin, keep the entire product visible
+  and preserve the same viewing angle and silhouette.
+- If any product pixel meets a source frame edge, treat the crop as immutable. Keep the same
+  extremity clipped at the same edge; do not outpaint, reconstruct, round off, recenter, or reveal
+  geometry outside the source.
+- State the expected number of top-level product subjects and enclosed openings in the prompt.
+  When either count is uncertain, route the item to visual review instead of guessing.
 
 ## Product-family checks
 
@@ -37,8 +49,9 @@ Append one of these blocks:
   Reduce uncontrolled glare without flattening metallic response.
 - Reflective products: ask for broad controlled highlights. Do not replace reflections with
   invented grooves, facets, or extra edges.
-- Assemblies: enumerate every visible component and fastener before editing. Verify the same
-  count after editing.
+- Assemblies: enumerate every top-level subject, component, and fastener before editing. Record
+  their left-to-right order and relative spacing; verify the same counts and arrangement after
+  editing.
 - Marked products: require exact retention of embossed or printed markings. If the model
   distorts a mark, preserve it from the source with a conventional image-editing step.
 
@@ -51,4 +64,5 @@ Reject and regenerate only the affected image when any of these occurs:
 - The viewing angle, handedness, proportions, bounding aspect ratio, or silhouette changes.
 - Text or embossing becomes invented or illegible.
 - Product pixels are removed with the chroma background.
+- An enclosed opening is filled, fragmented, reduced, or contains opaque residue in the alpha.
 - A colored fringe, opaque corner, fake shadow, floor, prop, or watermark remains.

@@ -100,7 +100,8 @@ python scripts/finalize_keyed_product.py `
   --key magenta `
   --output job/outputs/part_beautified.png `
   --qa job/qa/reports/part.json `
-  --batch-id B01
+  --batch-id B01 `
+  --structure-policy strict
 ```
 
 `--key auto` detects green or magenta from the image border. Specify the key explicitly for
@@ -113,13 +114,22 @@ border-connected, removed-interior, and protected-interior pixel counts. Inspect
 interior candidates in the keyed image and final alpha. Prefer a non-overlapping key color; do
 not force `--interior-key remove` when it could erase product color.
 
+The default `--structure-policy strict` compares the original structure with the extracted
+alpha before writing the final PNG. It checks major subject count, enclosed-opening count and
+area, fragmented opening edges, source-edge crops, and silhouette proportions. Hard failures
+stop the write. A review-only finding may be released only after direct source/output comparison
+with `--structure-policy warn --approve-structure-review`; that option cannot approve a hard
+subject or opening loss.
+
+
 ### 4.4 Validate the full delivery
 
 ```powershell
 python scripts/validate_outputs.py `
   --original-root job/originals `
   --root job/outputs `
-  --report job/qa/validation.json
+  --report job/qa/validation.json `
+  --structure-policy strict
 ```
 
 The validator treats `--original-root` as authoritative. It requires exactly one
@@ -129,6 +139,13 @@ unreadable originals. It also checks PNG/RGBA format, size, transparent corners,
 transparent and opaque pixels, and canvas-edge contact. Do not change `--expected` to the
 current output count to hide a failure. A nonzero exit code means the delivery is incomplete or
 an output check failed.
+
+Strict mode runs the structure comparison for every matched pair. A `severity: fail` finding
+is a non-approvable hard failure. A `severity: review` finding requires direct visual comparison.
+After confirming one review-only finding, repeat `--approve-structure-review` with its exact
+`<relative-output-path>`. Never approve a directory or loosen a threshold
+merely to make the batch pass.
+
 
 ### 4.5 Create a batch review sheet
 
@@ -150,5 +167,6 @@ any image with an engineering-structure change.
   preserve relative directories.
 - Default to 2048x2048 PNG, RGBA, with alpha zero at all four corners.
 - Preserve transparency through holes and open structures.
+- Allow no subject-count loss, missing opening, crop outpainting, or unapproved structure finding.
 - Add no text, brand, watermark, prop, floor, shadow, or decoration.
 - Report unreadable or damaged sources separately; never omit them silently.

@@ -8,12 +8,13 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from finalize_keyed_product import remove_key  # noqa: E402
+from structure_checks import compare_structure_images  # noqa: E402
 
 
 class KeyRemovalTests(unittest.TestCase):
@@ -55,30 +56,262 @@ class KeyRemovalTests(unittest.TestCase):
         self.assertEqual(tuple(rgba[0, 2, :3]), (70, 70, 70))
 
 
+class StructureComparisonTests(unittest.TestCase):
+    def test_matching_component_and_hole_pass(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        original_draw = ImageDraw.Draw(original)
+        original_draw.rectangle((24, 24, 104, 104), fill=(80, 80, 80))
+        original_draw.ellipse((50, 50, 78, 78), fill="white")
+
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        output_draw = ImageDraw.Draw(output)
+        output_draw.rectangle((24, 24, 104, 104), fill=(100, 100, 100, 255))
+        output_draw.ellipse((50, 50, 78, 78), fill=(0, 0, 0, 0))
+
+        result = compare_structure_images(original, output, max_side=128)
+        self.assertEqual(result["findings"], [])
+
+    def test_added_major_subject_requires_review(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        ImageDraw.Draw(original).rectangle((18, 30, 62, 98), fill=(70, 70, 70))
+
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        output_draw = ImageDraw.Draw(output)
+        output_draw.rectangle((12, 30, 52, 98), fill=(90, 90, 90, 255))
+        output_draw.rectangle((78, 40, 116, 90), fill=(90, 90, 90, 255))
+
+        result = compare_structure_images(original, output, max_side=128)
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("major_component_count_increased", codes)
+        self.assertFalse(result["hard_failure"])
+
+    def test_missing_major_subject_fails(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        original_draw = ImageDraw.Draw(original)
+        original_draw.rectangle((10, 30, 50, 98), fill=(70, 70, 70))
+        original_draw.rectangle((78, 38, 116, 92), fill=(70, 70, 70))
+
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        ImageDraw.Draw(output).rectangle((20, 25, 84, 103), fill=(90, 90, 90, 255))
+
+        result = compare_structure_images(original, output, max_side=128)
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("major_component_count_decreased", codes)
+        self.assertTrue(result["hard_failure"])
+
+    def test_opaque_hole_residue_fails(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        original_draw = ImageDraw.Draw(original)
+        original_draw.rectangle((18, 18, 110, 110), fill=(75, 75, 75))
+        original_draw.ellipse((44, 44, 84, 84), fill="white")
+
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        ImageDraw.Draw(output).rectangle((18, 18, 110, 110), fill=(95, 95, 95, 255))
+
+        result = compare_structure_images(original, output, max_side=128)
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("enclosed_hole_count_decreased", codes)
+        self.assertTrue(result["hard_failure"])
+
+    def test_fragmented_hole_edge_requires_review(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        original_draw = ImageDraw.Draw(original)
+        original_draw.rectangle((18, 18, 110, 110), fill=(75, 75, 75))
+        original_draw.ellipse((40, 40, 88, 88), fill="white")
+
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        output_draw = ImageDraw.Draw(output)
+        output_draw.rectangle((18, 18, 110, 110), fill=(95, 95, 95, 255))
+        output_draw.ellipse((40, 40, 88, 88), fill=(0, 0, 0, 0))
+        residue_boxes = (
+            (40, 59, 51, 63),
+            (77, 67, 88, 71),
+            (59, 40, 63, 51),
+            (67, 77, 71, 88),
+        )
+        for box in residue_boxes:
+            output_draw.rectangle(box, fill=(30, 30, 30, 255))
+
+        result = compare_structure_images(original, output, max_side=128)
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("transparent_hole_edge_fragmented", codes)
+
+    def test_source_crop_requires_review(self) -> None:
+        original = Image.new("RGB", (128, 128), "white")
+        ImageDraw.Draw(original).rectangle((0, 34, 82, 92), fill=(70, 70, 70))
+        output = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        ImageDraw.Draw(output).rounded_rectangle(
+            (18, 34, 110, 92), radius=20, fill=(90, 90, 90, 255)
+        )
+
+        result = compare_structure_images(original, output, max_side=128)
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("source_crop_requires_review", codes)
+        self.assertFalse(result["hard_failure"])
+
+
+class FinalizerStructureGateTests(unittest.TestCase):
+    def test_crop_review_is_blocked_then_explicitly_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_path = root / "original.png"
+            keyed_path = root / "keyed.png"
+            output_path = root / "output.png"
+            qa_path = root / "qa.json"
+
+            original = Image.new("RGB", (64, 64), "white")
+            ImageDraw.Draw(original).rectangle((0, 18, 42, 46), fill=(90, 90, 90))
+            original.save(original_path)
+
+            keyed = Image.new("RGB", (64, 64), (0, 255, 0))
+            ImageDraw.Draw(keyed).rounded_rectangle(
+                (8, 16, 56, 48), radius=10, fill=(100, 100, 100)
+            )
+            keyed.save(keyed_path)
+
+            base_command = [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "finalize_keyed_product.py"),
+                "--source",
+                str(keyed_path),
+                "--original",
+                str(original_path),
+                "--output",
+                str(output_path),
+                "--qa",
+                str(qa_path),
+                "--key",
+                "green",
+                "--canvas",
+                "256",
+                "--structure-analysis-size",
+                "128",
+            ]
+            blocked = subprocess.run(
+                base_command,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            blocked_data = json.loads(qa_path.read_text(encoding="utf-8"))
+            self.assertEqual(blocked.returncode, 1)
+            self.assertEqual(blocked_data["status"], "structure_rejected")
+            self.assertFalse(output_path.exists())
+
+            approved = subprocess.run(
+                base_command
+                + [
+                    "--structure-policy",
+                    "warn",
+                    "--approve-structure-review",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            approved_data = json.loads(qa_path.read_text(encoding="utf-8"))
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            self.assertTrue(output_path.exists())
+            self.assertEqual(approved_data["status"], "review_approved")
+            self.assertTrue(approved_data["delivery_ready"])
+
+
 class SourceCompletenessTests(unittest.TestCase):
     def run_validator(
         self,
         original_root: Path,
         output_root: Path,
         report: Path,
+        extra_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "validate_outputs.py"),
+            "--root",
+            str(output_root),
+            "--original-root",
+            str(original_root),
+            "--report",
+            str(report),
+            "--canvas",
+            "64",
+        ]
+        command.extend(extra_args or [])
         return subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "validate_outputs.py"),
-                "--root",
-                str(output_root),
-                "--original-root",
-                str(original_root),
-                "--report",
-                str(report),
-                "--canvas",
-                "64",
-            ],
+            command,
             text=True,
             capture_output=True,
             check=False,
         )
+
+    def test_review_only_finding_requires_explicit_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            originals = root / "originals" / "family"
+            outputs = root / "outputs" / "family"
+            originals.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+
+            original = Image.new("RGB", (64, 64), "white")
+            ImageDraw.Draw(original).rectangle((0, 18, 42, 46), fill=(90, 90, 90))
+            original.save(originals / "part.jpg")
+
+            output = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ImageDraw.Draw(output).rounded_rectangle(
+                (8, 16, 56, 48), radius=10, fill=(100, 100, 100, 255)
+            )
+            output.save(outputs / "part_beautified.png")
+
+            blocked_report = root / "blocked.json"
+            blocked = self.run_validator(root / "originals", root / "outputs", blocked_report)
+            self.assertEqual(blocked.returncode, 1)
+
+            approved_report = root / "approved.json"
+            approved = self.run_validator(
+                root / "originals",
+                root / "outputs",
+                approved_report,
+                ["--approve-structure-review", "family/part_beautified.png"],
+            )
+            approved_data = json.loads(approved_report.read_text(encoding="utf-8"))
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            self.assertTrue(approved_data["delivery_ready"])
+            self.assertEqual(approved_data["structure_review_approved_count"], 1)
+
+    def test_hard_structure_failure_cannot_be_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            originals = root / "originals" / "family"
+            outputs = root / "outputs" / "family"
+            originals.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+
+            original = Image.new("RGB", (64, 64), "white")
+            original_draw = ImageDraw.Draw(original)
+            original_draw.rectangle((5, 14, 25, 50), fill=(90, 90, 90))
+            original_draw.rectangle((39, 16, 59, 48), fill=(90, 90, 90))
+            original.save(originals / "part.jpg")
+
+            output = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ImageDraw.Draw(output).rectangle((12, 12, 48, 52), fill=(100, 100, 100, 255))
+            output.save(outputs / "part_beautified.png")
+
+            report = root / "hard.json"
+            result = self.run_validator(
+                root / "originals",
+                root / "outputs",
+                report,
+                [
+                    "--structure-policy",
+                    "warn",
+                    "--approve-structure-review",
+                    "family/part_beautified.png",
+                ],
+            )
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(data["structure_checks"][0]["review_approved"])
+            self.assertFalse(data["delivery_ready"])
 
     def test_missing_output_fails_then_matching_relative_output_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,7 +321,9 @@ class SourceCompletenessTests(unittest.TestCase):
             family = originals / "family"
             family.mkdir(parents=True)
             outputs.mkdir()
-            Image.new("RGB", (32, 24), (120, 130, 140)).save(family / "part.JPG")
+            original = Image.new("RGB", (32, 24), "white")
+            ImageDraw.Draw(original).rectangle((8, 4, 23, 19), fill=(120, 130, 140))
+            original.save(family / "part.JPG")
 
             first_report = root / "missing.json"
             first = self.run_validator(originals, outputs, first_report)
