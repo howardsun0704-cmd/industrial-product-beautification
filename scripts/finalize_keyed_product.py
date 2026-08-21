@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +66,141 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def paths_refer_to_same_file(first: Path, second: Path) -> bool:
+    """Return whether two paths resolve to the same destination."""
+    first_key = os.path.normcase(str(first.resolve()))
+    second_key = os.path.normcase(str(second.resolve()))
+    if first_key == second_key:
+        return True
+    try:
+        return first.exists() and second.exists() and os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def validate_distinct_paths(named_paths: list[tuple[str, Path]]) -> None:
+    """Reject every input/output alias before any artifact is written."""
+    for index, (name, path) in enumerate(named_paths):
+        for other_name, other_path in named_paths[:index]:
+            if paths_refer_to_same_file(path, other_path):
+                raise ValueError(f"--{name} must be distinct from --{other_name}")
+
+
+def validate_destination(path: Path, name: str) -> None:
+    if path.exists() and not path.is_file():
+        raise ValueError(f"--{name} must be a file path, not a directory")
+
+
+def make_temporary_sibling(target: Path, role: str) -> Path:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=f".{role}.tmp",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    return Path(temporary)
+
+
+def stage_bytes(target: Path, payload: bytes, role: str = "write") -> tuple[Path, Path]:
+    temporary = make_temporary_sibling(target, role)
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return temporary, target
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def stage_json(target: Path, payload: dict[str, object]) -> tuple[Path, Path]:
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return stage_bytes(target, encoded, role="json")
+
+
+def stage_image(target: Path, image: Image.Image) -> tuple[Path, Path]:
+    temporary = make_temporary_sibling(target, "png")
+    try:
+        with temporary.open("wb") as handle:
+            image.save(handle, format="PNG", optimize=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return temporary, target
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def stage_copy(source: Path, target: Path) -> tuple[Path, Path]:
+    temporary = make_temporary_sibling(target, "copy")
+    try:
+        shutil.copy2(source, temporary)
+        with temporary.open("rb+") as handle:
+            os.fsync(handle.fileno())
+        return temporary, target
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def cleanup_staged_files(staged: list[tuple[Path, Path]]) -> None:
+    for temporary, _ in staged:
+        temporary.unlink(missing_ok=True)
+
+
+def commit_staged_files(staged: list[tuple[Path, Path]]) -> None:
+    """Atomically replace each target and roll back the set on a commit error."""
+    backups: dict[Path, Path | None] = {}
+    committed: list[Path] = []
+    preserved_backups: set[Path] = set()
+    try:
+        for _, target in staged:
+            backup = None
+            if target.exists():
+                backup = make_temporary_sibling(target, "backup")
+                try:
+                    shutil.copy2(target, backup)
+                except BaseException:
+                    backup.unlink(missing_ok=True)
+                    raise
+            backups[target] = backup
+
+        for temporary, target in staged:
+            os.replace(temporary, target)
+            committed.append(target)
+    except BaseException as commit_error:
+        rollback_errors: list[str] = []
+        for target in reversed(committed):
+            backup = backups[target]
+            try:
+                if backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, target)
+            except BaseException as rollback_error:
+                if backup is not None:
+                    preserved_backups.add(backup)
+                rollback_errors.append(
+                    f"{target}: {rollback_error}; preserved backup: {backup}"
+                )
+        if rollback_errors:
+            raise RuntimeError(
+                "Artifact commit failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from commit_error
+        raise
+    finally:
+        cleanup_staged_files(staged)
+        for backup in backups.values():
+            if backup is not None and backup not in preserved_backups:
+                backup.unlink(missing_ok=True)
+
+
+def write_json_atomic(target: Path, payload: dict[str, object]) -> None:
+    commit_staged_files([stage_json(target, payload)])
 
 
 def border_key_scores(image: Image.Image) -> dict[str, float]:
@@ -247,16 +384,27 @@ def main() -> None:
         raise ValueError("--output must use the .png extension")
     if not args.source.is_file() or not args.original.is_file():
         raise FileNotFoundError("Both --source and --original must be readable files")
-    if args.output.resolve() in {args.source.resolve(), args.original.resolve()}:
-        raise ValueError("--output must not overwrite the source or original image")
+
+    named_paths = [
+        ("source", args.source),
+        ("original", args.original),
+        ("output", args.output),
+        ("qa", args.qa),
+    ]
+    if args.key_copy:
+        named_paths.append(("key-copy", args.key_copy))
+    validate_distinct_paths(named_paths)
+
+    destinations = [("output", args.output), ("qa", args.qa)]
+    if args.key_copy:
+        destinations.append(("key-copy", args.key_copy))
+    for name, path in destinations:
+        validate_destination(path, name)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.qa.parent.mkdir(parents=True, exist_ok=True)
     if args.key_copy:
-        if args.key_copy.resolve() in {args.source.resolve(), args.original.resolve()}:
-            raise ValueError("--key-copy must not overwrite a source file")
         args.key_copy.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(args.source, args.key_copy)
 
     with Image.open(args.source) as source:
         source.load()
@@ -288,10 +436,7 @@ def main() -> None:
                 "automatic_checks_passed": False,
                 "visual_structure_check_required": True,
             }
-            args.qa.write_text(
-                json.dumps(rejected_report, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            write_json_atomic(args.qa, rejected_report)
             codes = [str(item["code"]) for item in structure["findings"]]
             raise RuntimeError(f"Structure validation failed: {codes}")
 
@@ -329,7 +474,6 @@ def main() -> None:
     if not passed:
         raise RuntimeError(f"Alpha validation failed: {metrics}")
 
-    canvas.save(args.output, format="PNG", optimize=True)
     report = {
         "batch_id": args.batch_id,
         "status": (
@@ -358,7 +502,16 @@ def main() -> None:
         "delivery_ready": not (structure and structure["findings"]) or review_approved,
         "visual_structure_check_required": True,
     }
-    args.qa.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    staged: list[tuple[Path, Path]] = []
+    try:
+        if args.key_copy:
+            staged.append(stage_copy(args.source, args.key_copy))
+        staged.append(stage_image(args.output, canvas))
+        staged.append(stage_json(args.qa, report))
+    except BaseException:
+        cleanup_staged_files(staged)
+        raise
+    commit_staged_files(staged)
     print(json.dumps(report, ensure_ascii=False))
 
 

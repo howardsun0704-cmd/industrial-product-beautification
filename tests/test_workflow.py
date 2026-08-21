@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -13,7 +14,13 @@ from PIL import Image, ImageDraw
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from finalize_keyed_product import remove_key  # noqa: E402
+import finalize_keyed_product  # noqa: E402
+from finalize_keyed_product import (  # noqa: E402
+    commit_staged_files,
+    remove_key,
+    stage_bytes,
+    validate_distinct_paths,
+)
 from structure_checks import compare_structure_images  # noqa: E402
 
 
@@ -214,6 +221,175 @@ class FinalizerStructureGateTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertEqual(approved_data["status"], "review_approved")
             self.assertTrue(approved_data["delivery_ready"])
+
+
+class FinalizerAtomicWriteTests(unittest.TestCase):
+    def make_inputs(self, root: Path) -> tuple[Path, Path]:
+        original_path = root / "original.png"
+        keyed_path = root / "keyed.png"
+
+        original = Image.new("RGB", (64, 64), "white")
+        ImageDraw.Draw(original).rectangle((16, 16, 48, 48), fill=(90, 90, 90))
+        original.save(original_path)
+
+        keyed = Image.new("RGB", (64, 64), (0, 255, 0))
+        ImageDraw.Draw(keyed).rectangle((16, 16, 48, 48), fill=(90, 90, 90))
+        keyed.save(keyed_path)
+        return original_path, keyed_path
+
+    def run_finalizer(
+        self,
+        original: Path,
+        source: Path,
+        output: Path,
+        qa: Path,
+        extra_args: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "finalize_keyed_product.py"),
+            "--source",
+            str(source),
+            "--original",
+            str(original),
+            "--output",
+            str(output),
+            "--qa",
+            str(qa),
+            "--canvas",
+            "256",
+            "--structure-policy",
+            "off",
+        ]
+        command.extend(extra_args or [])
+        return subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def test_all_declared_paths_are_pairwise_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = ["source", "original", "key-copy", "output", "qa"]
+            paths = [root / f"{name}.dat" for name in names]
+            for first_index in range(len(paths)):
+                for second_index in range(first_index + 1, len(paths)):
+                    candidates = list(paths)
+                    candidates[second_index] = candidates[first_index]
+                    with self.subTest(
+                        first=names[first_index],
+                        second=names[second_index],
+                    ):
+                        with self.assertRaises(ValueError):
+                            validate_distinct_paths(list(zip(names, candidates)))
+
+    def test_existing_hardlink_alias_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.dat"
+            alias = root / "alias.dat"
+            source.write_bytes(b"same file")
+            try:
+                finalize_keyed_product.os.link(source, alias)
+            except OSError as error:
+                self.skipTest(f"Hard links are unavailable: {error}")
+
+            with self.assertRaises(ValueError):
+                validate_distinct_paths([("source", source), ("output", alias)])
+
+
+    def test_qa_cannot_overwrite_original(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, keyed = self.make_inputs(root)
+            original_before = original.read_bytes()
+            output = root / "output.png"
+
+            result = self.run_finalizer(original, keyed, output, original)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(original.read_bytes(), original_before)
+            self.assertFalse(output.exists())
+
+    def test_invalid_qa_destination_leaves_no_orphan_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, keyed = self.make_inputs(root)
+            output = root / "output.png"
+            qa_directory = root / "qa"
+            qa_directory.mkdir()
+
+            result = self.run_finalizer(original, keyed, output, qa_directory)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(output.exists())
+
+    def test_commit_failure_restores_old_files_and_removes_new_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            existing_target = root / "existing.dat"
+            new_target = root / "new.dat"
+            existing_target.write_bytes(b"old-existing")
+            staged_existing = stage_bytes(existing_target, b"new-existing")
+            staged_new = stage_bytes(new_target, b"new-file")
+            real_replace = finalize_keyed_product.os.replace
+            failed = False
+
+            def fail_second_commit(source: str | Path, target: str | Path) -> None:
+                nonlocal failed
+                is_second_commit = (
+                    Path(source) == staged_new[0]
+                    and Path(target) == new_target
+                    and not failed
+                )
+                if is_second_commit:
+                    failed = True
+                    raise OSError("simulated commit failure")
+                real_replace(source, target)
+
+            with mock.patch.object(
+                finalize_keyed_product.os,
+                "replace",
+                side_effect=fail_second_commit,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated commit failure"):
+                    commit_staged_files([staged_existing, staged_new])
+
+            self.assertEqual(existing_target.read_bytes(), b"old-existing")
+            self.assertFalse(new_target.exists())
+            self.assertEqual(list(root.iterdir()), [existing_target])
+
+    def test_success_publishes_all_artifacts_without_temporary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, keyed = self.make_inputs(root)
+            output = root / "output.png"
+            qa = root / "qa.json"
+            key_copy = root / "keyed-copy.png"
+
+            result = self.run_finalizer(
+                original,
+                keyed,
+                output,
+                qa,
+                ["--key-copy", str(key_copy)],
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(key_copy.read_bytes(), keyed.read_bytes())
+            with Image.open(output) as image:
+                self.assertEqual(image.mode, "RGBA")
+                self.assertEqual(image.size, (256, 256))
+            report = json.loads(qa.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "passed")
+            self.assertTrue(report["delivery_ready"])
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()),
+                [
+                    "keyed-copy.png",
+                    "keyed.png",
+                    "original.png",
+                    "output.png",
+                    "qa.json",
+                ],
+            )
 
 
 class SourceCompletenessTests(unittest.TestCase):

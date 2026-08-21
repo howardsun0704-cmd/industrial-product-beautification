@@ -69,6 +69,9 @@ threads, seams, markings, part count, viewing angle, proportions, and silhouette
 ## Output contract
 
 - Keep originals untouched and preserve their relative directory structure.
+- Keep source, original, keyed-copy, final-output, and QA paths pairwise distinct. Publish
+  artifacts through same-directory temporary files and atomic replacement; a failed publish
+  must restore prior files and leave no partial new delivery.
 - Produce exactly one correctly named output for every readable source image.
 - Deliver PNG in RGBA mode on a square canvas; default to 2048 x 2048.
 - Keep all four corner alpha values at zero and preserve transparency through holes and open
